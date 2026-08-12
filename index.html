@@ -74,6 +74,10 @@ button[disabled]{opacity:.35}
 .scan-ui{position:absolute;left:0;right:0;bottom:calc(20px + env(safe-area-inset-bottom));padding:0 16px;text-align:center}
 .scan-ui p{font-family:var(--mono);font-size:11.5px;color:#D6DBE4;margin:0 0 10px;line-height:1.5}
 .scan-ui .btns{display:flex;gap:7px;max-width:320px;margin:0 auto}
+.zoombar{display:flex;align-items:center;gap:10px;max-width:320px;margin:0 auto 10px;
+  background:rgba(0,0,0,.55);border:1px solid #3A3A3A;border-radius:11px;padding:8px 12px}
+.zoombar span{font-family:var(--mono);font-size:11px;color:var(--yellow);min-width:30px;text-align:right}
+.zoombar input{flex:1;accent-color:var(--yellow);height:22px}
 .scan-err{position:absolute;left:14px;right:14px;top:calc(16px + env(safe-area-inset-top));background:#241A1A;border:1px solid #5A2C2C;
   color:#FFD8D8;font-size:12.5px;line-height:1.55;padding:11px 13px;border-radius:10px;display:none;max-height:60vh;overflow:auto}
 .scan-err code{font-family:var(--mono);font-size:11px;color:#FFB4B4}
@@ -149,7 +153,13 @@ footer{margin-top:10px;font-family:var(--mono);font-size:9.5px;color:#5C6474;lin
   <div class="scan-err" id="scanErr"></div>
   <div class="scan-ui">
     <p id="scanMsg">Kamera aciliyor...</p>
+    <div class="zoombar">
+      <span style="min-width:auto;color:#9AA2B1">YAKIN</span>
+      <input type="range" id="zoom" min="10" max="40" value="16" step="1">
+      <span id="zoomVal">1.6x</span>
+    </div>
     <div class="btns">
+      <button id="btnFocus" class="ghost" style="color:#fff;border-color:#555">Netle</button>
       <button id="btnPhoto2" class="ghost" style="color:#fff;border-color:#555">Fotoğraf çek</button>
       <button id="btnStop">Kapat</button>
     </div>
@@ -202,7 +212,7 @@ function renderSVG(code,type,tall){
 }
 
 /* ---------- durum ---------- */
-const S={raw:"",mode:"auto",hist:[],rot:false};
+const S={raw:"",mode:"auto",hist:[],rot:false,zoom:1.6};
 const $=id=>document.getElementById(id);
 const autoType=()=>S.mode==="e8"?"EAN8":"EAN13";
 const maxLen=()=>autoType()==="EAN8"?8:13;
@@ -355,6 +365,14 @@ async function startScan(){
   const v=$("cam");
   v.srcObject=stream;v.setAttribute("playsinline","true");
   try{await v.play()}catch(e){}
+  try{
+    const tr=stream.getVideoTracks()[0];
+    const caps=tr.getCapabilities?tr.getCapabilities():{};
+    const adv=[];
+    if(caps.focusMode&&caps.focusMode.indexOf("continuous")>=0)adv.push({focusMode:"continuous"});
+    if(caps.focusDistance)adv.push({focusDistance:caps.focusDistance.min});
+    if(adv.length)await tr.applyConstraints({advanced:adv});
+  }catch(e){}
   $("scanMsg").textContent="Barkodu çerçeveye yerleştirin";
   reader=new ZXing.MultiFormatReader();
   reader.setHints(zxHints());
@@ -369,8 +387,11 @@ async function startScan(){
     const sc=Math.max(dw/vw,dh/vh);              // object-fit: cover
     const visW=dw/sc,visH=dh/sc;
     const offX=(vw-visW)/2,offY=(vh-visH)/2;
-    let sx=offX+box.left/sc, sy=offY+box.top/sc, sw=box.width/sc, sh=box.height/sc;
-    if(wide){ const g=0.35; sx-=sw*g/2; sy-=sh*g/2; sw*=1+g; sh*=1+g; }  // donusumlu genis tarama
+    let sw=box.width/sc, sh=box.height/sc;
+    const cx=offX+(box.left+box.width/2)/sc, cy=offY+(box.top+box.height/2)/sc;
+    const z=wide?S.zoom*0.72:S.zoom;      // donusumlu: bir dar bir genis
+    sw/=z; sh/=z;
+    let sx=cx-sw/2, sy=cy-sh/2;
     sx=Math.max(0,sx);sy=Math.max(0,sy);
     sw=Math.min(sw,vw-sx);sh=Math.min(sh,vh-sy);
     cv.width=Math.round(sw);cv.height=Math.round(sh);
@@ -393,10 +414,30 @@ async function startScan(){
       if(accept(res.getText(),fmt)){stopScan();return}
     }
     wide=!wide;
-    if(++miss===60)$("scanMsg").textContent="Telefonu 10-15 cm uzaklastirin, barkod cerceveyi doldursun";
-    if(miss===180)$("scanMsg").textContent="Hala okumuyorsa: isigi artirin veya Fotograf cek";
+    if(++miss===60)$("scanMsg").textContent="Telefonu 20-25 cm uzakta tutun, YAKIN cubugunu artirin";
+    if(miss===180)$("scanMsg").textContent="Bulanik ise ekrana dokunun (netle) veya Fotograf cek";
     try{reader.reset()}catch(e){}
   },120);
+}
+async function refocus(){
+  $("scanMsg").textContent="Netleniyor...";
+  const v=$("cam");
+  try{
+    const tr=stream&&stream.getVideoTracks()[0];
+    if(!tr)return;
+    const caps=tr.getCapabilities?tr.getCapabilities():{};
+    if(caps.focusMode&&caps.focusMode.indexOf("single-shot")>=0){
+      await tr.applyConstraints({advanced:[{focusMode:"single-shot"}]});
+      await new Promise(r=>setTimeout(r,400));
+      if(caps.focusMode.indexOf("continuous")>=0)await tr.applyConstraints({advanced:[{focusMode:"continuous"}]});
+    }else{
+      // iOS: cozunurluk degisimi kamerayi yeniden yapilandirir, otofokus sifirlanir
+      await tr.applyConstraints({width:{ideal:1280},height:{ideal:720}});
+      await new Promise(r=>setTimeout(r,250));
+      await tr.applyConstraints({width:{ideal:1920},height:{ideal:1080}});
+    }
+  }catch(e){}
+  $("scanMsg").textContent="Barkodu cerceveye yerlestirin";
 }
 function stopScan(){
   if(loopId){clearInterval(loopId);loopId=null}
@@ -404,6 +445,12 @@ function stopScan(){
   $("cam").srcObject=null;
   $("scanner").classList.remove("on");
 }
+$("zoom").addEventListener("input",e=>{
+  S.zoom=e.target.value/10;
+  $("zoomVal").textContent=S.zoom.toFixed(1)+"x";
+});
+$("btnFocus").onclick=refocus;
+$("cam").addEventListener("click",refocus);   // ekrana dokun = yeniden netle
 $("btnScan").onclick=startScan;
 $("btnStop").onclick=stopScan;
 
