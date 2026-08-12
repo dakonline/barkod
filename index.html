@@ -114,6 +114,7 @@ footer{margin-top:10px;font-family:var(--mono);font-size:9.5px;color:#5C6474;lin
 <div class="readout">
   <div class="digits" id="digits"><span class="caret"></span></div>
   <div class="status"><span id="lenInfo">0 / 13 hane</span><span id="checkInfo"></span></div>
+  <div id="rawRead" style="display:none;margin-top:7px;padding-top:7px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--yellow);word-break:break-all"></div>
 </div>
 
 <div class="row">
@@ -144,7 +145,7 @@ footer{margin-top:10px;font-family:var(--mono);font-size:9.5px;color:#5C6474;lin
 
 <div id="scanner">
   <video id="cam" playsinline muted autoplay></video>
-  <div class="reticle"><div class="laser"></div></div>
+  <div class="reticle" id="reticle"><div class="laser"></div></div>
   <div class="scan-err" id="scanErr"></div>
   <div class="scan-ui">
     <p id="scanMsg">Kamera aciliyor...</p>
@@ -263,7 +264,7 @@ function pushHist(c){
 }
 $("chips").addEventListener("click",e=>{
   const b=e.target.closest("button");if(!b)return;
-  S.raw=b.dataset.c;setMode(b.dataset.c.length===8?"e8":"e13");
+  accept(b.dataset.c,"");
 });
 $("btnBig").onclick=()=>{
   const f=render();if(!f)return;
@@ -288,18 +289,33 @@ function beep(){
   }catch(e){}
   if(navigator.vibrate)navigator.vibrate(35);
 }
-function accept(code){
-  if(!/^\d+$/.test(code))return false;
-  let c=code;
-  if(c.length===12)c="0"+c;
-  if(c.length!==13&&c.length!==8)return false;
-  beep();S.raw=c;setMode(c.length===8?"e8":"e13");pushHist(c);
+function showRaw(txt,fmt){
+  const el=$("rawRead");
+  el.style.display="block";
+  el.innerHTML="OKUNAN: <b>"+txt+"</b>"+(fmt?' &middot; <span style="color:var(--mute)">'+fmt+"</span>":"");
+}
+function accept(code,fmt){
+  if(!code)return false;
+  beep();
+  const c0=String(code).trim();
+  let c=c0;
+  if(/^\d+$/.test(c)&&c.length===12)c="0"+c;           // UPC-A -> EAN-13
+  if(/^\d+$/.test(c)&&(c.length===13||c.length===8)){
+    S.raw=c;setMode(c.length===8?"e8":"e13");
+    $("rawRead").style.display="none";
+  }else{
+    showRaw(c0,fmt?fmt+" - EAN degil, barkod cizilemiyor":"EAN degil");
+  }
+  pushHist(c0);
   return true;
 }
+
 function zxHints(){
   const h=new Map();
   h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.EAN_13,ZXing.BarcodeFormat.EAN_8,
-    ZXing.BarcodeFormat.UPC_A,ZXing.BarcodeFormat.UPC_E,ZXing.BarcodeFormat.CODE_128]);
+    ZXing.BarcodeFormat.UPC_A,ZXing.BarcodeFormat.UPC_E,ZXing.BarcodeFormat.CODE_128,
+    ZXing.BarcodeFormat.CODE_39,ZXing.BarcodeFormat.CODE_93,ZXing.BarcodeFormat.ITF,
+    ZXing.BarcodeFormat.CODABAR,ZXing.BarcodeFormat.QR_CODE]);
   h.set(ZXing.DecodeHintType.TRY_HARDER,true);
   return h;
 }
@@ -325,7 +341,7 @@ async function startScan(){
   if(typeof ZXing==="undefined"){scanErr("Okuyucu kütüphanesi yüklenemedi (internet?). <b>Fotoğraftan oku</b> veya elle tuşlayın.");return}
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){scanErr("Bu tarayıcı kamera akışını desteklemiyor. <b>Fotoğraftan oku</b> kullanın.");return}
   try{
-    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},audio:false});
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}},audio:false});
   }catch(err){
     const n=err&&err.name||"Hata";
     let msg="Kamera açılamadı. <code>"+n+"</code><br><br>";
@@ -343,25 +359,44 @@ async function startScan(){
   reader=new ZXing.MultiFormatReader();
   reader.setHints(zxHints());
   const cv=document.createElement("canvas"),ctx=cv.getContext("2d",{willReadFrequently:true});
-  let miss=0;
+  reader=new ZXing.MultiFormatReader();reader.setHints(zxHints());
+  const ret=$("reticle");
+  let miss=0,wide=false;
+
+  function grab(box){
+    const vw=v.videoWidth,vh=v.videoHeight;
+    const dw=v.clientWidth,dh=v.clientHeight;
+    const sc=Math.max(dw/vw,dh/vh);              // object-fit: cover
+    const visW=dw/sc,visH=dh/sc;
+    const offX=(vw-visW)/2,offY=(vh-visH)/2;
+    let sx=offX+box.left/sc, sy=offY+box.top/sc, sw=box.width/sc, sh=box.height/sc;
+    if(wide){ const g=0.35; sx-=sw*g/2; sy-=sh*g/2; sw*=1+g; sh*=1+g; }  // donusumlu genis tarama
+    sx=Math.max(0,sx);sy=Math.max(0,sy);
+    sw=Math.min(sw,vw-sx);sh=Math.min(sh,vh-sy);
+    cv.width=Math.round(sw);cv.height=Math.round(sh);
+    ctx.drawImage(v,sx,sy,sw,sh,0,0,cv.width,cv.height);
+  }
+  function tryDecode(){
+    const lum=new ZXing.HTMLCanvasElementLuminanceSource(cv);
+    const bmp=new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
+    return reader.decode(bmp);
+  }
+
   loopId=setInterval(()=>{
     if(!v.videoWidth)return;
-    // sadece cerceve bolgesini kes - hem hizli hem isabetli
-    const cw=v.videoWidth,ch=v.videoHeight;
-    const w=Math.round(cw*0.88),h=Math.round(ch*0.30);
-    const x=Math.round((cw-w)/2),y=Math.round(ch*0.44-h/2);
-    cv.width=w;cv.height=h;
-    ctx.drawImage(v,x,y,w,h,0,0,w,h);
-    try{
-      const lum=new ZXing.HTMLCanvasElementLuminanceSource(cv);
-      const bmp=new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
-      const res=reader.decode(bmp);
-      if(res&&accept(res.getText())){stopScan();return}
-    }catch(e){
-      if(++miss===120)$("scanMsg").textContent="Okunmuyorsa: telefonu 10-15 cm uzaklaştırın veya Fotoğraf çek";
+    grab(ret.getBoundingClientRect());
+    let res=null;
+    try{res=tryDecode()}catch(e){}
+    if(!res){ try{reader.reset()}catch(e){} }
+    if(res){
+      const fmt=(ZXing.BarcodeFormat[res.getBarcodeFormat()]||"").replace("_","-");
+      if(accept(res.getText(),fmt)){stopScan();return}
     }
+    wide=!wide;
+    if(++miss===60)$("scanMsg").textContent="Telefonu 10-15 cm uzaklastirin, barkod cerceveyi doldursun";
+    if(miss===180)$("scanMsg").textContent="Hala okumuyorsa: isigi artirin veya Fotograf cek";
     try{reader.reset()}catch(e){}
-  },140);
+  },120);
 }
 function stopScan(){
   if(loopId){clearInterval(loopId);loopId=null}
@@ -383,7 +418,7 @@ $("fileIn").addEventListener("change",async e=>{
   try{
     const r=new ZXing.BrowserMultiFormatReader(zxHints());
     const res=await r.decodeFromImageUrl(url);
-    ok=accept(res.getText());
+    ok=accept(res.getText(),(ZXing.BarcodeFormat[res.getBarcodeFormat()]||'').replace('_','-'));
   }catch(err){ok=false}
   URL.revokeObjectURL(url);e.target.value="";
   if(!ok){
