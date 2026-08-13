@@ -157,6 +157,7 @@ footer{margin-top:10px;font-family:var(--mono);font-size:9.5px;color:#5C6474;lin
   <div class="scan-err" id="scanErr"></div>
   <div class="scan-ui">
     <p id="scanMsg">Kamera aciliyor...</p>
+    <p id="scanDbg" style="display:none;font-size:10.5px;color:#8FE388;margin:-6px 0 10px"></p>
     <div class="modebar">
       <button id="mBar" aria-pressed="true">BARKOD TARA</button>
       <button id="mNum" aria-pressed="false">RAKAM OKU</button>
@@ -167,6 +168,7 @@ footer{margin-top:10px;font-family:var(--mono);font-size:9.5px;color:#5C6474;lin
       <span id="zoomVal">1.6x</span>
     </div>
     <div class="btns">
+      <button id="btnRead" class="primary" style="display:none">OKU</button>
       <button id="btnFocus" class="ghost" style="color:#fff;border-color:#555">Netle</button>
       <button id="btnPhoto2" class="ghost" style="color:#fff;border-color:#555">Fotoğraf çek</button>
       <button id="btnStop">Kapat</button>
@@ -396,20 +398,23 @@ function prepOCR(cv){
   c2.putImageData(img,0,0);
   return sh;
 }
-async function ocrStep(cv,ctx){
+async function ocrStep(cv,ctx,force){
   if(ocrBusy)return;
   ocrBusy=true;
+  const t0=Date.now();
   try{
     const w=await ensureOCR();
     const sharp=prepOCR(cv);
-    if(sharp<22&&ocrSkip<5){                         // cok bulanik: OCR'a gonderme
+    if(!force&&sharp<22&&ocrSkip<5){                         // cok bulanik: OCR'a gonderme
       ocrSkip++;
-      $("scanMsg").textContent="Netlenmesi bekleniyor... (ekrana dokunun)";
+      $("scanDbg").textContent="netlik "+sharp+" (dusuk) - atlandi";
       ocrBusy=false;return;
     }
     ocrSkip=0;
     const res=await w.recognize(ocrCv);
-    const code=pickCode((res&&res.data&&res.data.text)||"");
+    const raw=((res&&res.data&&res.data.text)||"").replace(/\s+/g," ").trim();
+    const code=pickCode(raw);
+    $("scanDbg").textContent="netlik "+sharp+" | "+((Date.now()-t0)/1000).toFixed(1)+"sn | goren: "+(raw.slice(0,26)||"-");
     if(code){
       const ean=(code.length===13||code.length===8)&&checkDigit(code.slice(0,-1))===+code[code.length-1];
       if(ean||ocrPrev===code){                       // kontrol hanesi tutuyorsa tek okumada kabul
@@ -418,9 +423,10 @@ async function ocrStep(cv,ctx){
       $("scanMsg").textContent="Okunan: "+code+" (dogrulaniyor)";
       ocrPrev=code;
     }else{
-      $("scanMsg").textContent="Rakam gorulmedi - yaklasin veya YAKIN cubugunu artirin";
+      $("scanMsg").textContent="Rakam gorulmedi - yaklasin veya YAKIN'i artirin";
     }
   }catch(e){
+    $("scanDbg").textContent="hata: "+(e.message||e);
     if(String(e.message||e).indexOf("no-tesseract")>=0)
       scanErr("Rakam okuyucu yuklenemedi (internet?). Barkod modu calismaya devam eder.");
   }
@@ -557,6 +563,13 @@ async function startScan(){
     return reader.decode(bmp);
   }
 
+  window.forceRead=()=>{                       // OKU butonu: esik/netlik gozetmeden tek gecis
+    if(!v.videoWidth)return;
+    ocrBusy=false;
+    grab(ret.getBoundingClientRect());
+    $("scanDbg").textContent="okunuyor...";
+    ocrStep(cv,ctx,true);
+  };
   let native=null;
   try{
     if("BarcodeDetector" in window){
@@ -568,7 +581,7 @@ async function startScan(){
     if(S.smode==="ocr"){
       if(!v.videoWidth)return;
       grab(ret.getBoundingClientRect());
-      ocrStep(cv,ctx);
+      ocrStep(cv,ctx,false);
       return;
     }
     if(native&&v.videoWidth){
@@ -615,7 +628,7 @@ async function refocus(){
       await tr.applyConstraints({width:{ideal:1920},height:{ideal:1080}});
     }
   }catch(e){}
-  $("scanMsg").textContent="Barkodu cerceveye yerlestirin";
+  modeMsg();
 }
 function stopScan(){
   ocrPrev="";
@@ -638,14 +651,23 @@ $("zoom").addEventListener("input",async e=>{
     }
   }catch(err){}
 });
+function modeMsg(){
+  $("scanMsg").textContent = S.smode==="ocr"
+    ? "Rakamlar cerceveyi doldursun - OKU'ya basabilirsiniz"
+    : "Barkodu cerceveye yerlestirin";
+}
 function setScanMode(m){
   S.smode=m;ocrPrev="";
   $("mBar").setAttribute("aria-pressed",m==="bar");
   $("mNum").setAttribute("aria-pressed",m==="ocr");
   $("reticle").classList.toggle("ocr",m==="ocr");
-  $("scanMsg").textContent = m==="ocr" ? "Sadece rakamlar cerceveyi doldursun (YAKIN ile buyutun)" : "Barkodu cerceveye yerlestirin";
+  $("scanDbg").style.display = m==="ocr" ? "block" : "none";
+  $("btnRead").style.display  = m==="ocr" ? "block" : "none";
+  modeMsg();
   if(m==="ocr")ensureOCR().catch(()=>{});
 }
+window.forceRead=null;
+$("btnRead").onclick=()=>{ if(window.forceRead)window.forceRead(); };
 $("mBar").onclick=()=>setScanMode("bar");
 $("mNum").onclick=()=>setScanMode("ocr");
 $("btnFocus").onclick=refocus;
