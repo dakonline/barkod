@@ -336,7 +336,7 @@ $("btnPrint").onclick=()=>window.print();
 
 
 /* ---------- rakam okuma (OCR) ---------- */
-let ocrWorker=null,ocrBusy=false,ocrPrev="",ocrCv=null;
+let ocrWorker=null,ocrBusy=false,ocrPrev="",ocrCv=null,ocrSkip=0;
 async function ensureOCR(){
   if(ocrWorker)return ocrWorker;
   if(typeof Tesseract==="undefined")throw new Error("no-tesseract");
@@ -369,10 +369,11 @@ function prepOCR(cv){
   const img=c2.getImageData(0,0,W,H),d=img.data;
   const g=new Uint8Array(W*H),hist=new Uint32Array(256);
   for(let i=0,j=0;j<W*H;i+=4,j++){const v=(d[i]*77+d[i+1]*151+d[i+2]*28)>>8;g[j]=v;hist[v]++}
-  // netlik: yatay komsu farklarinin ortalamasi
-  let sh=0,n=0;
-  for(let y=0;y<H;y+=3){const o=y*W;for(let x=1;x<W;x++){sh+=Math.abs(g[o+x]-g[o+x-1]);n++}}
-  sh=n?sh/n:0;
+  // netlik: gradyanlarin en keskin %2'si (genis duz zemin olcumu bozmasin)
+  const gh=new Uint32Array(256);let gn=0;
+  for(let y=0;y<H;y+=2){const o=y*W;for(let x=1;x<W;x++){gh[Math.abs(g[o+x]-g[o+x-1])]++;gn++}}
+  let acc=0,sh=0;
+  for(let i=255;i>=0;i--){acc+=gh[i];if(acc>=gn*0.02){sh=i;break}}
   // Otsu esik
   const tot=W*H;let sum=0;for(let i=0;i<256;i++)sum+=i*hist[i];
   let sumB=0,wB=0,best=0,thr=128;
@@ -383,7 +384,13 @@ function prepOCR(cv){
     const mB=sumB/wB,mF=(sum-sumB)/wF,v=wB*wF*(mB-mF)*(mB-mF);
     if(v>best){best=v;thr=i}
   }
-  for(let i=0,j=0;j<W*H;i+=4,j++){const v=g[j]>thr?255:0;d[i]=d[i+1]=d[i+2]=v;d[i+3]=255}
+  let white=0;
+  for(let j=0;j<W*H;j++)if(g[j]>thr)white++;
+  const inv=white<W*H*0.5;                           // zemin koyuysa: yaziyi siyaha cevir
+  for(let i=0,j=0;j<W*H;i+=4,j++){
+    let v=g[j]>thr?255:0; if(inv)v=255-v;
+    d[i]=d[i+1]=d[i+2]=v;d[i+3]=255;
+  }
   c2.putImageData(img,0,0);
   return sh;
 }
@@ -393,10 +400,12 @@ async function ocrStep(cv,ctx){
   try{
     const w=await ensureOCR();
     const sharp=prepOCR(cv);
-    if(sharp<5.5){                                   // bulanik kare: OCR'a hic gonderme
+    if(sharp<22&&ocrSkip<5){                         // cok bulanik: OCR'a gonderme
+      ocrSkip++;
       $("scanMsg").textContent="Netlenmesi bekleniyor... (ekrana dokunun)";
       ocrBusy=false;return;
     }
+    ocrSkip=0;
     const res=await w.recognize(ocrCv);
     const code=pickCode((res&&res.data&&res.data.text)||"");
     if(code){
