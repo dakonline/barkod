@@ -346,7 +346,7 @@ async function ensureOCR(){
   ocrWorker=await Tesseract.createWorker("eng");
   await ocrWorker.setParameters({
     tessedit_char_whitelist:"0123456789",
-    tessedit_pageseg_mode:"6",
+    tessedit_pageseg_mode:"11",
     classify_bln_numeric_mode:"1",
     user_defined_dpi:"300"
   });
@@ -361,42 +361,59 @@ function pickCode(txt){
   const r=runs[0];
   return (r&&r.length>=8)?r:null;
 }
+let ocrPad=null,ocrBin=null,ocrPol=false;   // ocrPol: son ise yarayan kutupluluk
 function prepOCR(cv){
   if(!ocrCv)ocrCv=document.createElement("canvas");
-  const target=280;                                  // rakamlar yeterince buyuk kalsin
+  if(!ocrPad)ocrPad=document.createElement("canvas");
+  const target=280;
   const k=Math.max(0.4,Math.min(3,target/cv.height));
-  ocrCv.width=Math.round(cv.width*k);ocrCv.height=Math.round(cv.height*k);
+  const W=Math.round(cv.width*k),H=Math.round(cv.height*k);
+  ocrCv.width=W;ocrCv.height=H;
   const c2=ocrCv.getContext("2d",{willReadFrequently:true});
   c2.imageSmoothingQuality="high";
-  c2.drawImage(cv,0,0,ocrCv.width,ocrCv.height);
-  const W=ocrCv.width,H=ocrCv.height;
-  const img=c2.getImageData(0,0,W,H),d=img.data;
-  const g=new Uint8Array(W*H),hist=new Uint32Array(256);
-  for(let i=0,j=0;j<W*H;i+=4,j++){const v=(d[i]*77+d[i+1]*151+d[i+2]*28)>>8;g[j]=v;hist[v]++}
-  // netlik: gradyanlarin en keskin %2'si (genis duz zemin olcumu bozmasin)
+  c2.drawImage(cv,0,0,W,H);
+  const img=c2.getImageData(0,0,W,H),d=img.data,N=W*H;
+  const g=new Uint8Array(N);
+  for(let i=0,j=0;j<N;i+=4,j++)g[j]=(d[i]*77+d[i+1]*151+d[i+2]*28)>>8;
+
+  // netlik: gradyanlarin en keskin %2'si
   const gh=new Uint32Array(256);let gn=0;
   for(let y=0;y<H;y+=2){const o=y*W;for(let x=1;x<W;x++){gh[Math.abs(g[o+x]-g[o+x-1])]++;gn++}}
   let acc=0,sh=0;
   for(let i=255;i>=0;i--){acc+=gh[i];if(acc>=gn*0.02){sh=i;break}}
-  // Otsu esik
-  const tot=W*H;let sum=0;for(let i=0;i<256;i++)sum+=i*hist[i];
-  let sumB=0,wB=0,best=0,thr=128;
-  for(let i=0;i<256;i++){
-    wB+=hist[i];if(!wB)continue;
-    const wF=tot-wB;if(!wF)break;
-    sumB+=i*hist[i];
-    const mB=sumB/wB,mF=(sum-sumB)/wF,v=wB*wF*(mB-mF)*(mB-mF);
-    if(v>best){best=v;thr=i}
+
+  // YEREL esikleme (integral goruntu): parlak arama kutusu + koyu sayfa bir arada olsa da calisir
+  const I=new Float64Array((W+1)*(H+1));
+  for(let y=0;y<H;y++){let row=0;for(let x=0;x<W;x++){row+=g[y*W+x];I[(y+1)*(W+1)+x+1]=I[y*(W+1)+x+1]+row}}
+  const r=Math.max(6,Math.round(H/8));
+  let dark=0;
+  const bin=new Uint8Array(N);
+  for(let y=0;y<H;y++){
+    const y0=Math.max(0,y-r),y1=Math.min(H-1,y+r);
+    for(let x=0;x<W;x++){
+      const x0=Math.max(0,x-r),x1=Math.min(W-1,x+r);
+      const area=(x1-x0+1)*(y1-y0+1);
+      const sum=I[(y1+1)*(W+1)+x1+1]-I[y0*(W+1)+x1+1]-I[(y1+1)*(W+1)+x0]+I[y0*(W+1)+x0];
+      const v=g[y*W+x]>(sum/area-7)?255:0;
+      bin[y*W+x]=v; if(!v)dark++;
+    }
   }
-  let white=0;
-  for(let j=0;j<W*H;j++)if(g[j]>thr)white++;
-  const inv=white<W*H*0.5;                           // zemin koyuysa: yaziyi siyaha cevir
+  ocrBin={bin:bin,W:W,H:H,img:img,d:d,c2:c2};
+  return sh;
+}
+function paintOCR(invert){
+  const {bin,W,H,img,d,c2}=ocrBin;
   for(let i=0,j=0;j<W*H;i+=4,j++){
-    let v=g[j]>thr?255:0; if(inv)v=255-v;
+    const v=invert?255-bin[j]:bin[j];
     d[i]=d[i+1]=d[i+2]=v;d[i+3]=255;
   }
   c2.putImageData(img,0,0);
-  return sh;
+  const P=18;
+  ocrPad.width=W+P*2;ocrPad.height=H+P*2;
+  const cp=ocrPad.getContext("2d");
+  cp.fillStyle="#fff";cp.fillRect(0,0,ocrPad.width,ocrPad.height);
+  cp.drawImage(ocrCv,P,P);
+  return ocrPad;
 }
 async function ocrStep(cv,ctx,force){
   if(ocrBusy)return;
@@ -405,15 +422,20 @@ async function ocrStep(cv,ctx,force){
   try{
     const w=await ensureOCR();
     const sharp=prepOCR(cv);
-    if(!force&&sharp<22&&ocrSkip<5){                         // cok bulanik: OCR'a gonderme
+    if(!force&&sharp<12&&ocrSkip<3){                         // cok bulanik: OCR'a gonderme
       ocrSkip++;
       $("scanDbg").textContent="netlik "+sharp+" (dusuk) - atlandi";
       ocrBusy=false;return;
     }
     ocrSkip=0;
-    const res=await w.recognize(ocrCv);
-    const raw=((res&&res.data&&res.data.text)||"").replace(/\s+/g," ").trim();
-    const code=pickCode(raw);
+    let raw="",code=null;
+    for(const pol of [ocrPol,!ocrPol]){                 // once gecen sefer ise yarayan
+      const res=await w.recognize(paintOCR(pol));
+      const t=((res&&res.data&&res.data.text)||"").replace(/\s+/g," ").trim();
+      raw=raw?raw+" | "+t:t;
+      const c=pickCode(t);
+      if(c){code=c;ocrPol=pol;break}
+    }
     $("scanDbg").textContent="netlik "+sharp+" | "+((Date.now()-t0)/1000).toFixed(1)+"sn | goren: "+(raw.slice(0,26)||"-");
     if(code){
       const ean=(code.length===13||code.length===8)&&checkDigit(code.slice(0,-1))===+code[code.length-1];
