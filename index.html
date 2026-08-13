@@ -344,7 +344,7 @@ async function ensureOCR(){
   ocrWorker=await Tesseract.createWorker("eng");
   await ocrWorker.setParameters({
     tessedit_char_whitelist:"0123456789",
-    tessedit_pageseg_mode:"7",
+    tessedit_pageseg_mode:"6",
     classify_bln_numeric_mode:"1",
     user_defined_dpi:"300"
   });
@@ -353,14 +353,16 @@ async function ensureOCR(){
 }
 function pickCode(txt){
   const runs=(txt.replace(/[^0-9\s]/g," ").match(/\d+/g)||[]).sort((a,b)=>b.length-a.length);
+  const valid=runs.find(x=>(x.length===13||x.length===8)&&checkDigit(x.slice(0,-1))===+x[x.length-1]);
+  if(valid)return valid;                              // kontrol hanesi tutan varsa oncelik onda
   for(const want of [13,12,8]){const r=runs.find(x=>x.length===want);if(r)return r}
   const r=runs[0];
   return (r&&r.length>=8)?r:null;
 }
 function prepOCR(cv){
   if(!ocrCv)ocrCv=document.createElement("canvas");
-  const target=150;                                  // OCR icin ideal yukseklik
-  const k=Math.max(0.2,Math.min(2,target/cv.height));
+  const target=280;                                  // rakamlar yeterince buyuk kalsin
+  const k=Math.max(0.4,Math.min(3,target/cv.height));
   ocrCv.width=Math.round(cv.width*k);ocrCv.height=Math.round(cv.height*k);
   const c2=ocrCv.getContext("2d",{willReadFrequently:true});
   c2.imageSmoothingQuality="high";
@@ -416,7 +418,7 @@ async function ocrStep(cv,ctx){
       $("scanMsg").textContent="Okunan: "+code+" (dogrulaniyor)";
       ocrPrev=code;
     }else{
-      $("scanMsg").textContent="Rakam gorulmedi - cerceveyi rakamlarla doldurun";
+      $("scanMsg").textContent="Rakam gorulmedi - yaklasin veya YAKIN cubugunu artirin";
     }
   }catch(e){
     if(String(e.message||e).indexOf("no-tesseract")>=0)
@@ -641,7 +643,7 @@ function setScanMode(m){
   $("mBar").setAttribute("aria-pressed",m==="bar");
   $("mNum").setAttribute("aria-pressed",m==="ocr");
   $("reticle").classList.toggle("ocr",m==="ocr");
-  $("scanMsg").textContent = m==="ocr" ? "Rakamlari cerceveye sigdirin, sabit tutun" : "Barkodu cerceveye yerlestirin";
+  $("scanMsg").textContent = m==="ocr" ? "Sadece rakamlar cerceveyi doldursun (YAKIN ile buyutun)" : "Barkodu cerceveye yerlestirin";
   if(m==="ocr")ensureOCR().catch(()=>{});
 }
 $("mBar").onclick=()=>setScanMode("bar");
