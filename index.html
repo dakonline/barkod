@@ -68,6 +68,7 @@ button[disabled]{opacity:.35}
 #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
 .reticle{position:absolute;left:4%;right:4%;top:44%;transform:translateY(-50%);height:190px;
   border:2px solid var(--yellow);border-radius:10px;box-shadow:0 0 0 100vmax rgba(0,0,0,.5);pointer-events:none}
+.reticle.ocr{height:96px}
 .reticle .laser{position:absolute;left:0;right:0;top:50%;height:2px;background:var(--yellow);opacity:.9;animation:sweep 2s ease-in-out infinite}
 @keyframes sweep{0%,100%{transform:translateY(-80px)}50%{transform:translateY(80px)}}
 @media (prefers-reduced-motion:reduce){.laser{animation:none}.caret{animation:none}}
@@ -341,7 +342,12 @@ async function ensureOCR(){
   if(typeof Tesseract==="undefined")throw new Error("no-tesseract");
   $("scanMsg").textContent="Rakam okuyucu hazirlaniyor (ilk acilista 10-20 sn)...";
   ocrWorker=await Tesseract.createWorker("eng");
-  await ocrWorker.setParameters({tessedit_char_whitelist:"0123456789",tessedit_pageseg_mode:"7"});
+  await ocrWorker.setParameters({
+    tessedit_char_whitelist:"0123456789",
+    tessedit_pageseg_mode:"7",
+    classify_bln_numeric_mode:"1",
+    user_defined_dpi:"300"
+  });
   $("scanMsg").textContent="Rakamlari cerceveye alin";
   return ocrWorker;
 }
@@ -351,26 +357,61 @@ function pickCode(txt){
   const r=runs[0];
   return (r&&r.length>=8)?r:null;
 }
+function prepOCR(cv){
+  if(!ocrCv)ocrCv=document.createElement("canvas");
+  const target=150;                                  // OCR icin ideal yukseklik
+  const k=Math.max(0.2,Math.min(2,target/cv.height));
+  ocrCv.width=Math.round(cv.width*k);ocrCv.height=Math.round(cv.height*k);
+  const c2=ocrCv.getContext("2d",{willReadFrequently:true});
+  c2.imageSmoothingQuality="high";
+  c2.drawImage(cv,0,0,ocrCv.width,ocrCv.height);
+  const W=ocrCv.width,H=ocrCv.height;
+  const img=c2.getImageData(0,0,W,H),d=img.data;
+  const g=new Uint8Array(W*H),hist=new Uint32Array(256);
+  for(let i=0,j=0;j<W*H;i+=4,j++){const v=(d[i]*77+d[i+1]*151+d[i+2]*28)>>8;g[j]=v;hist[v]++}
+  // netlik: yatay komsu farklarinin ortalamasi
+  let sh=0,n=0;
+  for(let y=0;y<H;y+=3){const o=y*W;for(let x=1;x<W;x++){sh+=Math.abs(g[o+x]-g[o+x-1]);n++}}
+  sh=n?sh/n:0;
+  // Otsu esik
+  const tot=W*H;let sum=0;for(let i=0;i<256;i++)sum+=i*hist[i];
+  let sumB=0,wB=0,best=0,thr=128;
+  for(let i=0;i<256;i++){
+    wB+=hist[i];if(!wB)continue;
+    const wF=tot-wB;if(!wF)break;
+    sumB+=i*hist[i];
+    const mB=sumB/wB,mF=(sum-sumB)/wF,v=wB*wF*(mB-mF)*(mB-mF);
+    if(v>best){best=v;thr=i}
+  }
+  for(let i=0,j=0;j<W*H;i+=4,j++){const v=g[j]>thr?255:0;d[i]=d[i+1]=d[i+2]=v;d[i+3]=255}
+  c2.putImageData(img,0,0);
+  return sh;
+}
 async function ocrStep(cv,ctx){
   if(ocrBusy)return;
   ocrBusy=true;
   try{
     const w=await ensureOCR();
-    if(!ocrCv)ocrCv=document.createElement("canvas");
-    ocrCv.width=cv.width*2;ocrCv.height=cv.height*2;          // buyutunce okuma isabeti artiyor
-    const c2=ocrCv.getContext("2d");
-    c2.imageSmoothingQuality="high";
-    c2.drawImage(cv,0,0,ocrCv.width,ocrCv.height);
+    const sharp=prepOCR(cv);
+    if(sharp<5.5){                                   // bulanik kare: OCR'a hic gonderme
+      $("scanMsg").textContent="Netlenmesi bekleniyor... (ekrana dokunun)";
+      ocrBusy=false;return;
+    }
     const res=await w.recognize(ocrCv);
     const code=pickCode((res&&res.data&&res.data.text)||"");
     if(code){
-      $("scanMsg").textContent="Okunan: "+code+(ocrPrev===code?"" : " (dogrulaniyor...)");
-      if(ocrPrev===code){ if(accept(code,"RAKAM")){stopScan()} }   // ayni sonuc iki kez -> kabul
+      const ean=(code.length===13||code.length===8)&&checkDigit(code.slice(0,-1))===+code[code.length-1];
+      if(ean||ocrPrev===code){                       // kontrol hanesi tutuyorsa tek okumada kabul
+        if(accept(code,"RAKAM")){stopScan();return}
+      }
+      $("scanMsg").textContent="Okunan: "+code+" (dogrulaniyor)";
       ocrPrev=code;
+    }else{
+      $("scanMsg").textContent="Rakam gorulmedi - cerceveyi rakamlarla doldurun";
     }
   }catch(e){
     if(String(e.message||e).indexOf("no-tesseract")>=0)
-      scanErr("Rakam okuyucu yuklenemedi (internet baglantisi?). Barkod modu calismaya devam eder.");
+      scanErr("Rakam okuyucu yuklenemedi (internet?). Barkod modu calismaya devam eder.");
   }
   ocrBusy=false;
 }
@@ -590,7 +631,8 @@ function setScanMode(m){
   S.smode=m;ocrPrev="";
   $("mBar").setAttribute("aria-pressed",m==="bar");
   $("mNum").setAttribute("aria-pressed",m==="ocr");
-  $("scanMsg").textContent = m==="ocr" ? "Sadece rakamlari cerceveye alin, sabit tutun" : "Barkodu cerceveye yerlestirin";
+  $("reticle").classList.toggle("ocr",m==="ocr");
+  $("scanMsg").textContent = m==="ocr" ? "Rakamlari cerceveye sigdirin, sabit tutun" : "Barkodu cerceveye yerlestirin";
   if(m==="ocr")ensureOCR().catch(()=>{});
 }
 $("mBar").onclick=()=>setScanMode("bar");
