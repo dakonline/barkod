@@ -28,6 +28,10 @@ header .sub{font-family:var(--mono);font-size:10px;color:var(--mute);margin-left
 .paper svg{display:block;width:100%;height:auto}
 .paper.empty{display:flex;align-items:center;justify-content:center;min-height:96px;text-align:center;padding:14px}
 .paper.empty p{color:#7A8090;font-size:12.5px;line-height:1.45;margin:0;max-width:230px}
+.paper.flash{animation:pop .5s ease-out}
+@keyframes pop{0%{box-shadow:0 0 0 0 rgba(242,194,0,0)}
+  18%{box-shadow:0 0 0 6px rgba(242,194,0,.95)}
+  100%{box-shadow:0 0 0 0 rgba(242,194,0,0)}}
 .paper .stamp{position:absolute;top:7px;right:9px;font-family:var(--mono);font-size:9px;letter-spacing:.08em;color:#BCC2CE}
 .wrap{position:relative}
 .expand{position:absolute;right:8px;bottom:7px;background:#000;color:#fff;border:0;border-radius:7px;
@@ -280,6 +284,7 @@ function render(){
       p.classList.remove("empty");
       p.innerHTML='<div class="stamp">CODE-128</div>'+svg;
       $("btnBig").style.display="block";$("btnPrint").disabled=false;
+      signal("C128:"+S.free);
       return null;
     }
   }
@@ -287,10 +292,12 @@ function render(){
     p.classList.remove("empty");
     p.innerHTML='<div class="stamp">'+(type==="EAN8"?"EAN-8":"EAN-13")+'</div>'+renderSVG(full,type,false);
     $("btnBig").style.display="block";$("btnPrint").disabled=false;
+    signal(full);
   }else{
     p.classList.add("empty");
     p.innerHTML="<p>"+(S.raw.length?("Barkod icin "+(need-S.raw.length)+" hane daha."):"Kod yok. Kamerayı açın, fotoğraf çekin ya da rakamları tuşlayın.")+"</p>";
     $("btnBig").style.display="none";$("btnPrint").disabled=true;
+    lastSignal=null;
   }
   return full;
 }
@@ -456,6 +463,31 @@ async function ocrStep(cv,ctx,force){
 }
 
 /* ---------- okuma ---------- */
+let lastSignal=null;
+function chime(){                       // C-E-G: kisa, yumusak "oldu" sesi
+  try{
+    const c=new (window.AudioContext||window.webkitAudioContext)();
+    if(c.state==="suspended")c.resume();
+    [[523.25,0],[659.25,.075],[783.99,.15]].forEach(([f,t],i)=>{
+      const o=c.createOscillator(),g=c.createGain();
+      o.type="sine";o.frequency.value=f;
+      o.connect(g);g.connect(c.destination);
+      const s0=c.currentTime+t, dur=i===2?.34:.16;
+      g.gain.setValueAtTime(.0001,s0);
+      g.gain.exponentialRampToValueAtTime(.22,s0+.012);
+      g.gain.exponentialRampToValueAtTime(.0001,s0+dur);
+      o.start(s0);o.stop(s0+dur+.02);
+    });
+  }catch(e){}
+  if(navigator.vibrate)navigator.vibrate([25,45,70]);   // destekleyen cihazlarda
+}
+function signal(code){                  // barkod ekrana cizildiginde bir kez
+  if(!code||code===lastSignal)return;
+  lastSignal=code;
+  chime();
+  const p=$("paper");
+  p.classList.remove("flash");void p.offsetWidth;p.classList.add("flash");
+}
 function beep(){
   try{
     const c=new (window.AudioContext||window.webkitAudioContext)();
@@ -475,7 +507,6 @@ function showRaw(txt,fmt){
 }
 function accept(code,fmt){
   if(!code)return false;
-  beep();
   const c0=String(code).trim();
   let c=c0;
   if(/^\d+$/.test(c)&&c.length===12)c="0"+c;           // UPC-A -> EAN-13
@@ -485,7 +516,8 @@ function accept(code,fmt){
   }else{
     S.raw="";S.free=c0;
     showRaw(c0,(fmt||"kod")+" - Code-128 olarak cizildi");
-    render();
+    if(!render()&&!S.free)beep();
+    if(!renderCode128(c0,false))beep();          // cizilemeyen kod: yine de sesli uyar
   }
   pushHist(c0);
   return true;
