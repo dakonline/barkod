@@ -576,7 +576,9 @@ async function startScan(){
     if(caps.focusDistance)adv.push({focusDistance:caps.focusDistance.min});
     if(adv.length)await tr.applyConstraints({advanced:adv});
   }catch(e){}
-  $("scanMsg").textContent="Barkodu çerçeveye yerleştirin";
+  modeMsg();
+  v.addEventListener("resize",fixVideoLayout);   // boyut degisince yerlesimi duzelt
+  fixVideoLayout();
   reader=new ZXing.MultiFormatReader();
   reader.setHints(zxHints());
   const cv=document.createElement("canvas"),ctx=cv.getContext("2d",{willReadFrequently:true});
@@ -664,6 +666,28 @@ async function startScan(){
     try{reader.reset()}catch(e){}
   },120);
 }
+function fixVideoLayout(){          // iOS 27: cozunurluk degisince video yeniden yerlesmiyor
+  const v=$("cam");
+  v.style.objectFit="fill";
+  requestAnimationFrame(()=>{ v.style.objectFit="cover"; });
+}
+async function restartStream(){     // kamerayi temiz sekilde yeniden ac (otofokus da sifirlanir)
+  const v=$("cam");
+  try{ if(stream)stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+  stream=await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}},audio:false
+  });
+  v.srcObject=stream; v.setAttribute("playsinline","true");
+  try{ await v.play(); }catch(e){}
+  if(S.hwZoom){                      // donanim zoom'u geri uygula
+    try{
+      const tr=stream.getVideoTracks()[0];
+      const caps=tr.getCapabilities?tr.getCapabilities():null;
+      if(caps&&caps.zoom)await tr.applyConstraints({advanced:[{zoom:S.hwZoom}]});
+    }catch(e){}
+  }
+  fixVideoLayout();
+}
 async function refocus(){
   $("scanMsg").textContent="Netleniyor...";
   const v=$("cam");
@@ -676,10 +700,7 @@ async function refocus(){
       await new Promise(r=>setTimeout(r,400));
       if(caps.focusMode.indexOf("continuous")>=0)await tr.applyConstraints({advanced:[{focusMode:"continuous"}]});
     }else{
-      // iOS: cozunurluk degisimi kamerayi yeniden yapilandirir, otofokus sifirlanir
-      await tr.applyConstraints({width:{ideal:1280},height:{ideal:720}});
-      await new Promise(r=>setTimeout(r,250));
-      await tr.applyConstraints({width:{ideal:1920},height:{ideal:1080}});
+      await restartStream();          // iOS: akisi yeniden kur, otofokus bastan calisir
     }
   }catch(e){}
   modeMsg();
